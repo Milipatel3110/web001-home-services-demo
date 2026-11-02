@@ -1,0 +1,8 @@
+# Only the settings this project relies on. Merge into an existing config.toml
+# if `supabase init` already created one.
+
+[functions.contact-submit]
+# Intentionally public: the browser calls this without any Supabase key.
+# Protection comes from the origin allowlist, validation, honeypot and size
+# limits inside the function. The Windmill token never leaves Edge secrets.
+verify_jwt = false

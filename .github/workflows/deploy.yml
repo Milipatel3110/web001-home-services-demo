@@ -1,0 +1,64 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+
+      # Locked install: fails if package-lock.json is missing or out of sync.
+      - name: Install (locked)
+        run: npm ci
+
+      - uses: actions/configure-pages@v5
+
+      # vite.config.ts builds with base /web001-home-services-demo/.
+      - name: Build
+        run: npm run build
+        env:
+          # Public URL of the Edge Function (a repository *variable*, not a secret).
+          VITE_CONTACT_FUNCTION_URL: ${{ vars.VITE_CONTACT_FUNCTION_URL }}
+
+      - name: SPA fallback for GitHub Pages
+        run: cp dist/index.html dist/404.html
+
+      - name: Automated checks
+        env:
+          VITE_CONTACT_FUNCTION_URL: ${{ vars.VITE_CONTACT_FUNCTION_URL }}
+        run: |
+          npm test
+          npm run test:backend
+          node scripts/check-dist.mjs dist /web001-home-services-demo/
+
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

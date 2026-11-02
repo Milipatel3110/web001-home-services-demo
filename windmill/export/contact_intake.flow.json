@@ -1,0 +1,90 @@
+{
+  "summary": "WEB-001 contact intake",
+  "description": "Called synchronously by Supabase Edge Function contact-submit. Idempotently stores a contact submission and returns {stored:true, request_id}.",
+  "value": {
+    "modules": [
+      {
+        "id": "store_submission",
+        "summary": "Idempotent insert into public.contact_submissions",
+        "value": {
+          "type": "rawscript",
+          "language": "bun",
+          "content": "// Windmill step \"store_submission\" of flow f/web001/contact_intake (Bun).\n// Idempotent insert into public.contact_submissions via PostgREST using the\n// service-role/secret key, which Windmill injects from a secret variable.\n// Throws on any failure so the synchronous webhook reports an error.\n\nconst UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;\n\nexport async function main(\n  request_id: string,\n  name: string,\n  email: string,\n  message: string,\n  supabase_url: string,\n  supabase_service_key: string,\n) {\n  // Defense in depth: the Edge Function already validated, but this flow is\n  // also reachable by anyone holding the webhook token.\n  if (typeof request_id !== \"string\" || !UUID_RE.test(request_id)) throw new Error(\"invalid request_id\");\n  for (const [field, value, min, max] of [[\"name\", name, 2, 80], [\"email\", email, 3, 254], [\"message\", message, 10, 1000]] as const) {\n    if (typeof value !== \"string\" || value.trim().length < min || value.length > max) throw new Error(`invalid ${field}`);\n  }\n  if (!supabase_url || !supabase_service_key) throw new Error(\"supabase credentials not configured\");\n\n  const base = `${supabase_url.replace(/\\/+$/, \"\")}/rest/v1/contact_submissions`;\n  const headers: Record<string, string> = { apikey: supabase_service_key, \"Content-Type\": \"application/json\" };\n  // Legacy service_role keys are JWTs and also go in Authorization;\n  // new sb_secret_ keys must only be sent as apikey.\n  if (supabase_service_key.startsWith(\"eyJ\")) headers.Authorization = `Bearer ${supabase_service_key}`;\n\n  const insert = await fetch(`${base}?on_conflict=request_id&select=request_id`, {\n    method: \"POST\",\n    headers: { ...headers, Prefer: \"resolution=ignore-duplicates,return=representation\" },\n    body: JSON.stringify({ request_id, name, email, message }),\n  });\n  if (!insert.ok) throw new Error(`insert failed: HTTP ${insert.status}`);\n  const rows = (await insert.json()) as Array<{ request_id: string }>;\n  if (rows.length === 1 && rows[0].request_id === request_id) {\n    return { stored: true, request_id, duplicate: false };\n  }\n\n  // Conflict path returns no rows: confirm the existing row before reporting success.\n  const check = await fetch(`${base}?request_id=eq.${request_id}&select=request_id`, { headers });\n  if (!check.ok) throw new Error(`verify failed: HTTP ${check.status}`);\n  const existing = (await check.json()) as Array<{ request_id: string }>;\n  if (existing.length !== 1) throw new Error(\"insert not confirmed\");\n  return { stored: true, request_id, duplicate: true };\n}\n",
+          "input_transforms": {
+            "request_id": {
+              "type": "javascript",
+              "expr": "flow_input.request_id"
+            },
+            "name": {
+              "type": "javascript",
+              "expr": "flow_input.name"
+            },
+            "email": {
+              "type": "javascript",
+              "expr": "flow_input.email"
+            },
+            "message": {
+              "type": "javascript",
+              "expr": "flow_input.message"
+            },
+            "supabase_url": {
+              "type": "static",
+              "value": "$var:f/web001/supabase_url"
+            },
+            "supabase_service_key": {
+              "type": "static",
+              "value": "$var:f/web001/supabase_service_key"
+            }
+          }
+        },
+        "retry": {
+          "constant": {
+            "attempts": 2,
+            "seconds": 2
+          }
+        }
+      }
+    ]
+  },
+  "schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "order": [
+      "request_id",
+      "name",
+      "email",
+      "message"
+    ],
+    "properties": {
+      "request_id": {
+        "type": "string",
+        "description": "Client-generated UUID, idempotency key",
+        "maxLength": 36
+      },
+      "name": {
+        "type": "string",
+        "description": "Sender name",
+        "maxLength": 80,
+        "minLength": 2
+      },
+      "email": {
+        "type": "string",
+        "description": "Sender email",
+        "maxLength": 254,
+        "format": "email"
+      },
+      "message": {
+        "type": "string",
+        "description": "Message body",
+        "maxLength": 1000,
+        "minLength": 10
+      }
+    },
+    "required": [
+      "request_id",
+      "name",
+      "email",
+      "message"
+    ]
+  }
+}
